@@ -15,6 +15,8 @@ import os
 import re
 import shutil
 import mimetypes
+from re import search
+
 import requests
 from pathlib import Path
 from datetime import datetime
@@ -824,27 +826,45 @@ def upload_inline_image_to_gemini(jwt: str, session_name: str, team_id: str,
         return None
 
 
-def stream_chat_with_images(jwt: str, sess_name: str, message: str, 
+def stream_chat_with_images(jwt: str, sess_name: str, message: str, model: str,
                             proxy: str, team_id: str, file_ids: List[str] = None) -> ChatResponse:
     """发送消息并流式接收响应"""
     query_parts = [{"text": message}]
     request_file_ids = file_ids if file_ids else []
+
+    # 根据模型名称后缀判断功能类型
+    is_search = '-search' in model
+    is_image_generation = '-image' in model
+    is_video_generation = '-video' in model
+
+    # 清理模型名称（移除功能后缀）
+    model = model.replace('-search', '').replace('-image', '').replace('-video', '')
+
+    # 动态构建工具规格
+    tools_spec = {}
+    if is_search:
+        tools_spec["webGroundingSpec"] = {}
+    if is_image_generation:
+        tools_spec["imageGenerationSpec"] = {}
+    if is_video_generation:
+        tools_spec["videoGenerationSpec"] = {}
     
+    print(f"使用的工具情况{tools_spec}")
+    print(f"使用的模型是:{model}")
+
+    # 构建请求体
     body = {
         "configId": team_id,
         "additionalParams": {"token": "-"},
         "streamAssistRequest": {
+            "assistGenerationConfig":{"modelId": model},
             "session": sess_name,
             "query": {"parts": query_parts},
             "filter": "",
             "fileIds": request_file_ids,
+            "assistSkippingMode": "REQUEST_ASSIST",
             "answerGenerationMode": "NORMAL",
-            "toolsSpec": {
-                "webGroundingSpec": {},
-                "toolRegistry": "default_tool_registry",
-                "imageGenerationSpec": {},
-                "videoGenerationSpec": {}
-            },
+            "toolsSpec": tools_spec,  # 使用动态构建的工具规格
             "languageCode": "zh-CN",
             "userMetadata": {"timeZone": "Etc/GMT-8"},
             "assistSkippingMode": "REQUEST_ASSIST"
@@ -1259,6 +1279,9 @@ def chat_completions():
         messages = data.get('messages', [])
         prompts = data.get('prompts', [])  # 支持替代格式
         stream = data.get('stream', False)
+        model = data.get('model', 'gemini-2.5-flash')
+        model = str(model)
+
 
         # 提取用户消息、图片和文件ID
         user_message = ""
@@ -1333,7 +1356,7 @@ def chat_completions():
                     if uploaded_file_id:
                         gemini_file_ids.append(uploaded_file_id)
                 
-                chat_response = stream_chat_with_images(jwt, session, user_message, proxy, team_id, gemini_file_ids)
+                chat_response = stream_chat_with_images(jwt, session, user_message, model,proxy, team_id, gemini_file_ids)
                 break
             except Exception as e:
                 last_error = e
@@ -1476,11 +1499,27 @@ def serve_image(filename):
         with open(filepath, 'rb') as f:
             image_data = f.read()
 
-        # 创建响应并添加CORS头
+        # 创建响应并添加完整的跨域和缓存头
         response = Response(image_data, mimetype=mime_type)
+
+        # CORS头 - 允许所有来源访问
         response.headers['Access-Control-Allow-Origin'] = '*'
         response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
-        response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Referer'
+        response.headers['Access-Control-Expose-Headers'] = 'Content-Length, Content-Type'
+
+        # 防盗链相关头 - 确保图片可以在网页中嵌入显示
+        response.headers['Cross-Origin-Resource-Policy'] = 'cross-origin'
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+
+        # 缓存控制 - 提高性能
+        response.headers['Cache-Control'] = 'public, max-age=3600'
+
+        # 内容显示方式 - 确保浏览器直接显示而不是下载
+        response.headers['Content-Disposition'] = f'inline; filename="{filename}"'
+
+        # 添加Vary头以确保正确的缓存行为
+        response.headers['Vary'] = 'Origin, Accept-Encoding'
 
         return response
     except Exception as e:
@@ -2004,4 +2043,4 @@ if __name__ == '__main__':
     if not account_manager.accounts:
         print("[!] 警告: 没有配置任何账号")
     
-    app.run(host='0.0.0.0', port=8000, debug=False)
+    app.run(host='0.0.0.0', port=18000, debug=False)
