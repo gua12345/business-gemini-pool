@@ -13,6 +13,7 @@ import uuid
 import threading
 import os
 import re
+import shutil
 import requests
 from pathlib import Path
 from datetime import datetime
@@ -1280,6 +1281,15 @@ def print_startup_info():
     print("Business Gemini OpenAPI 服务 (多账号轮训版)")
     print("支持图片输入输出 (OpenAI格式)")
     print("="*60)
+    
+    # 检测配置文件是否存在，不存在则从 .example 复制初始化
+    example_file = Path(__file__).parent / "business_gemini_session.json.example"
+    if not CONFIG_FILE.exists():
+        if example_file.exists():
+            shutil.copy(example_file, CONFIG_FILE)
+            print(f"\n[初始化] 配置文件不存在，已从 {example_file.name} 复制创建")
+        else:
+            print(f"\n[警告] 配置文件和示例文件都不存在，请创建 {CONFIG_FILE.name}")
     
     # 加载配置
     account_manager.load_config()
