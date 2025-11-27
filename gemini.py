@@ -45,6 +45,7 @@ GETOXSRF_URL = "https://business.gemini.google/auth/getoxsrf"
 
 # Flask应用
 app = Flask(__name__, static_folder='.')
+app.secret_key = 'business-gemini-pool-secret-key-2024'  # 设置 session 密钥
 CORS(app)
 
 
@@ -119,6 +120,104 @@ class AccountManager:
 
 # 全局账号管理器
 account_manager = AccountManager()
+
+
+# ==================== 鉴权系统 ====================
+
+def check_auth(token: str = None) -> bool:
+    """统一的认证检查 - 使用api_key"""
+    apikey = account_manager.config.get("apikey")
+    if not apikey:
+        # 如果没有设置 API key，则允许访问（兼容原有行为）
+        return True
+
+    # 如果传入了token，直接验证
+    if token:
+        return token == apikey
+
+    # 检查 Authorization header（API接口认证）
+    auth_header = request.headers.get('Authorization')
+    if auth_header and auth_header.startswith('Bearer '):
+        return auth_header[7:] == apikey
+
+    return False
+
+
+def check_admin_auth() -> bool:
+    """检查管理页面认证状态"""
+    apikey = account_manager.config.get("apikey")
+    if not apikey:
+        # 如果没有设置API key，则允许访问（兼容原有行为）
+        return True
+
+    # 检查 session 中是否有认证标记（Web界面登录）
+    from flask import session
+    if session.get('admin_authenticated') == True:
+        return True
+
+    # 检查 Authorization header（API接口认证）
+    return check_auth()
+
+
+def check_api_auth() -> bool:
+    """检查 API 鉴权（兼容性保留）"""
+    return check_auth()
+
+
+def require_admin_auth(f):
+    """管理页面鉴权装饰器"""
+    from functools import wraps
+    from flask import redirect, request
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not check_admin_auth():
+            # 如果未认证，返回登录页面
+            apikey = account_manager.config.get("apikey")
+            if apikey:
+                # 配置了API Key，需要登录
+                if request.path != '/login':
+                    return redirect('/login')
+                else:
+                    return f  # 允许访问登录页面
+            else:
+                # 未配置API Key，允许直接访问（兼容原有行为）
+                return f(*args, **kwargs)
+        return f(*args, **kwargs)
+    return decorated_function
+
+
+def require_api_auth(f):
+    """API 接口鉴权装饰器"""
+    from functools import wraps
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not check_api_auth():
+            return jsonify({
+                "error": {
+                    "message": "Invalid or missing API key",
+                    "type": "authentication_error"
+                }
+            }), 401
+        return f(*args, **kwargs)
+    return decorated_function
+
+
+# 更新启动信息以包含鉴权配置
+def print_auth_info():
+    """打印鉴权配置信息"""
+    admin_pwd = account_manager.config.get("admin_pwd")
+    apikey = account_manager.config.get("apikey")
+
+    print(f"\n[鉴权配置]")
+    if admin_pwd:
+        print(f"  管理页面: ✓ 已启用密码保护")
+    else:
+        print(f"  管理页面: ✗ 未设置密码（开放访问）")
+
+    if apikey:
+        print(f"  API 接口: ✓ 已启用 API Key 鉴权")
+    else:
+        print(f"  API 接口: ✗ 未设置 API Key（开放访问）")
 
 
 class FileManager:
@@ -948,6 +1047,7 @@ def parse_attachment(att: Dict, result: ChatResponse, proxy: Optional[str] = Non
 # ==================== OpenAPI 接口 ====================
 
 @app.route('/v1/models', methods=['GET'])
+@require_api_auth
 def list_models():
     """获取模型列表"""
     models_config = account_manager.config.get("models", [])
@@ -980,6 +1080,7 @@ def list_models():
 
 
 @app.route('/v1/files', methods=['POST'])
+@require_api_auth
 def upload_file():
     """OpenAI 兼容的文件上传接口"""
     import traceback
@@ -1100,6 +1201,7 @@ def upload_file():
 
 
 @app.route('/v1/files', methods=['GET'])
+@require_api_auth
 def list_files():
     """获取已上传文件列表"""
     files = file_manager.list_files()
@@ -1117,6 +1219,7 @@ def list_files():
 
 
 @app.route('/v1/files/<file_id>', methods=['GET'])
+@require_api_auth
 def get_file(file_id):
     """获取文件信息"""
     file_info = file_manager.get_file(file_id)
@@ -1134,6 +1237,7 @@ def get_file(file_id):
 
 
 @app.route('/v1/files/<file_id>', methods=['DELETE'])
+@require_api_auth
 def delete_file(file_id):
     """删除文件"""
     if file_manager.delete_file(file_id):
@@ -1146,6 +1250,7 @@ def delete_file(file_id):
 
 
 @app.route('/v1/chat/completions', methods=['POST'])
+@require_api_auth
 def chat_completions():
     """聊天对话接口（支持图片输入输出）"""
     try:
@@ -1400,17 +1505,140 @@ def system_status():
 
 # ==================== 管理接口 ====================
 
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    """管理页面登录"""
+    admin_pwd = account_manager.config.get("admin_pwd")
+    if not admin_pwd:
+        # 如果没有设置密码，直接重定向到管理页面
+        return redirect('/')
+
+    if request.method == 'GET':
+        # 返回简单的登录页面
+        login_html = '''
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>登录 - Business Gemini Pool</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+               background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+               display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+        .login-card { background: white; padding: 2rem; border-radius: 8px; box-shadow: 0 10px 25px rgba(0,0,0,0.1); width: 100%; max-width: 400px; }
+        .logo { text-align: center; margin-bottom: 2rem; }
+        .logo h1 { color: #4285f4; margin: 0; font-size: 24px; }
+        .form-group { margin-bottom: 1.5rem; }
+        label { display: block; margin-bottom: 0.5rem; color: #333; font-weight: 500; }
+        input[type="password"] { width: 100%; padding: 0.75rem; border: 2px solid #e4e7eb; border-radius: 6px; font-size: 16px; transition: border-color 0.3s; }
+        input[type="password"]:focus { outline: none; border-color: #4285f4; }
+        .btn { width: 100%; padding: 0.75rem; background: #4285f4; color: white; border: none; border-radius: 6px; font-size: 16px; cursor: pointer; transition: background 0.3s; }
+        .btn:hover { background: #3367d6; }
+        .error { color: #ea4335; margin-top: 1rem; text-align: center; }
+    </style>
+</head>
+<body>
+    <div class="login-card">
+        <div class="logo">
+            <h1>Business Gemini Pool</h1>
+        </div>
+        <form method="post">
+            <div class="form-group">
+                <label for="password">API Key</label>
+                <input type="password" id="password" name="password" placeholder="请输入API Key" required>
+            </div>
+            <button type="submit" class="btn">登录</button>
+        </form>
+        {% if error %}
+        <div class="error">{{ error }}</div>
+        {% endif %}
+    </div>
+</body>
+</html>
+        '''
+        from flask import render_template_string
+        return render_template_string(login_html, error=request.args.get('error'))
+
+    # 处理登录 POST 请求 - 使用api_key统一认证
+    from flask import session, redirect
+    password = request.form.get('password')
+    apikey = account_manager.config.get("apikey")
+
+    if apikey and password == apikey:
+        session['admin_authenticated'] = True
+        return redirect('/')
+    elif not apikey:
+        # 如果没有设置apikey，显示配置提示
+        return redirect('/login?error=请在配置文件中设置apikey')
+    else:
+        return redirect('/login?error=API Key错误')
+
+
+@app.route('/api/login', methods=['POST'])
+def api_login():
+    """AJAX登录接口 - 统一使用api_key验证"""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'success': False, 'error': '请求体为空'}), 400
+
+        apikey = data.get('apikey') or data.get('password')
+        config_apikey = account_manager.config.get("apikey")
+
+        if not config_apikey:
+            return jsonify({
+                'success': False,
+                'error': '请先在配置文件中设置apikey',
+                'code': 'missing_config'
+            })
+
+        if apikey != config_apikey:
+            return jsonify({
+                'success': False,
+                'error': 'API Key验证失败',
+                'code': 'invalid_key'
+            })
+
+        # 验证成功
+        from flask import session
+        session['admin_authenticated'] = True
+
+        return jsonify({
+            'success': True,
+            'message': '登录成功',
+            'apikey': apikey  # 返回API key供前端保存
+        })
+
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'登录失败: {str(e)}'
+        }), 500
+
+
+@app.route('/logout', methods=['POST'])
+def logout():
+    """管理页面登出"""
+    from flask import session
+    session.pop('admin_authenticated', None)
+    return redirect('/login')
+
+
 @app.route('/')
+@require_admin_auth
 def index():
     """返回管理页面"""
     return send_from_directory('.', 'index.html')
 
 @app.route('/chat_history.html')
+@require_admin_auth
 def chat_history():
     """返回聊天记录页面"""
     return send_from_directory('.', 'chat_history.html')
 
 @app.route('/api/accounts', methods=['GET'])
+@require_api_auth
 def get_accounts():
     """获取账号列表"""
     accounts_data = []
@@ -1432,6 +1660,7 @@ def get_accounts():
 
 
 @app.route('/api/accounts', methods=['POST'])
+@require_api_auth
 def add_account():
     """添加账号"""
     data = request.json
@@ -1459,6 +1688,7 @@ def add_account():
 
 
 @app.route('/api/accounts/<int:account_id>', methods=['PUT'])
+@require_api_auth
 def update_account(account_id):
     """更新账号"""
     if account_id < 0 or account_id >= len(account_manager.accounts):
@@ -1485,6 +1715,7 @@ def update_account(account_id):
 
 
 @app.route('/api/accounts/<int:account_id>', methods=['DELETE'])
+@require_api_auth
 def delete_account(account_id):
     """删除账号"""
     if account_id < 0 or account_id >= len(account_manager.accounts):
@@ -1506,6 +1737,7 @@ def delete_account(account_id):
 
 
 @app.route('/api/accounts/<int:account_id>/toggle', methods=['POST'])
+@require_api_auth
 def toggle_account(account_id):
     """切换账号状态"""
     if account_id < 0 or account_id >= len(account_manager.accounts):
@@ -1526,6 +1758,7 @@ def toggle_account(account_id):
 
 
 @app.route('/api/accounts/<int:account_id>/test', methods=['GET'])
+@require_api_auth
 def test_account(account_id):
     """测试账号JWT获取"""
     if account_id < 0 or account_id >= len(account_manager.accounts):
@@ -1542,6 +1775,7 @@ def test_account(account_id):
 
 
 @app.route('/api/models', methods=['GET'])
+@require_api_auth
 def get_models_config():
     """获取模型配置"""
     models = account_manager.config.get("models", [])
@@ -1549,6 +1783,7 @@ def get_models_config():
 
 
 @app.route('/api/models', methods=['POST'])
+@require_api_auth
 def add_model():
     """添加模型"""
     data = request.json
@@ -1571,6 +1806,7 @@ def add_model():
 
 
 @app.route('/api/models/<model_id>', methods=['PUT'])
+@require_api_auth
 def update_model(model_id):
     """更新模型"""
     models = account_manager.config.get("models", [])
@@ -1594,6 +1830,7 @@ def update_model(model_id):
 
 
 @app.route('/api/models/<model_id>', methods=['DELETE'])
+@require_api_auth
 def delete_model(model_id):
     """删除模型"""
     models = account_manager.config.get("models", [])
@@ -1607,12 +1844,14 @@ def delete_model(model_id):
 
 
 @app.route('/api/config', methods=['GET'])
+@require_api_auth
 def get_config():
     """获取完整配置"""
     return jsonify(account_manager.config)
 
 
 @app.route('/api/config', methods=['PUT'])
+@require_api_auth
 def update_config():
     """更新配置"""
     data = request.json
@@ -1623,6 +1862,7 @@ def update_config():
 
 
 @app.route('/api/config/import', methods=['POST'])
+@require_api_auth
 def import_config():
     """导入配置"""
     try:
@@ -1646,6 +1886,7 @@ def import_config():
 
 
 @app.route('/api/proxy/test', methods=['POST'])
+@require_api_auth
 def test_proxy():
     """测试代理"""
     data = request.json
@@ -1662,6 +1903,7 @@ def test_proxy():
 
 
 @app.route('/api/proxy/status', methods=['GET'])
+@require_api_auth
 def get_proxy_status():
     """获取代理状态"""
     proxy = account_manager.config.get("proxy")
@@ -1677,6 +1919,7 @@ def get_proxy_status():
 
 
 @app.route('/api/config/export', methods=['GET'])
+@require_api_auth
 def export_config():
     """导出配置"""
     return jsonify(account_manager.config)
@@ -1701,6 +1944,9 @@ def print_startup_info():
     # 加载配置
     account_manager.load_config()
     
+    # 鉴权配置信息
+    print_auth_info()
+
     # 代理信息
     proxy = account_manager.config.get("proxy")
     print(f"\n[代理配置]")
@@ -1708,7 +1954,7 @@ def print_startup_info():
     if proxy:
         proxy_available = check_proxy(proxy)
         print(f"  状态: {'✓ 可用' if proxy_available else '✗ 不可用'}")
-    
+
     # 图片缓存信息
     print(f"\n[图片缓存]")
     print(f"  目录: {IMAGE_CACHE_DIR}")

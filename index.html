@@ -674,6 +674,25 @@
                 <div class="card-body">
                     <form id="settingsForm">
                         <div class="settings-section">
+                            <h3>API 设置</h3>
+                            <div class="form-group">
+                                <label class="form-label" for="apiKey">重新验证 API Key</label>
+                                <input type="password" class="form-input" id="apiKey" placeholder="输入新的API Key进行验证" onkeypress="if(event.key==='Enter') verifyApiKey()">
+                                <small>当前API Key已保存，如需更换请输入新密钥并验证</small>
+                                <div style="display: flex; gap: 12px; margin-top: 12px;">
+                                    <button type="button" class="btn btn-primary" onclick="verifyApiKey()">
+                                        验证并保存
+                                    </button>
+                                    <button type="button" class="btn btn-outline" onclick="relogin()">
+                                        重新登录
+                                    </button>
+                                </div>
+                                <div class="api-key-status" id="apiKeyStatus" style="margin-top: 8px;"></div>
+                                <div class="api-key-info" id="apiKeyInfo" style="margin-top: 8px; font-size: 14px; color: var(--text-muted);"></div>
+                            </div>
+                        </div>
+
+                        <div class="settings-section">
                             <h3>代理设置</h3>
                             <div class="form-group">
                                 <label class="form-label" for="proxyUrl">代理地址</label>
@@ -947,9 +966,206 @@
         let currentEditAccountId = null;
         let currentEditModelId = null;
 
+        // --- API Key 管理 ---
+        function getApiKey() {
+            return localStorage.getItem('apiKey') || '';
+        }
+
+        function setApiKey(apiKey) {
+            localStorage.setItem('apiKey', apiKey);
+        }
+
+        function getAuthHeaders() {
+            const apiKey = getApiKey();
+            if (apiKey) {
+                return {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${apiKey}`
+                };
+            }
+            return {
+                'Content-Type': 'application/json'
+            };
+        }
+
+        // 验证并更新API Key
+        async function verifyApiKey() {
+            const apiKeyInput = document.getElementById('apiKey');
+            const apiKeyStatus = document.getElementById('apiKeyStatus');
+            const newApiKey = apiKeyInput.value.trim();
+
+            if (!newApiKey) {
+                apiKeyStatus.textContent = 'API Key不能为空';
+                apiKeyStatus.style.color = 'var(--danger)';
+                return;
+            }
+
+            apiKeyStatus.textContent = '验证中...';
+            apiKeyStatus.style.color = 'var(--text-muted)';
+
+            try {
+                const res = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ apikey: newApiKey })
+                });
+
+                const data = await res.json();
+
+                if (data.success) {
+                    setApiKey(newApiKey);
+                    apiKeyStatus.textContent = 'API Key验证成功并已更新';
+                    apiKeyStatus.style.color = 'var(--success)';
+                    updateApiKeyInfo();
+                    showToast('API Key更新成功！', 'success');
+                } else {
+                    apiKeyStatus.textContent = data.error || '验证失败';
+                    apiKeyStatus.style.color = 'var(--danger)';
+                }
+            } catch (e) {
+                apiKeyStatus.textContent = '验证请求失败: ' + e.message;
+                apiKeyStatus.style.color = 'var(--danger)';
+            }
+        }
+
+        // 重新登录（清除当前API Key并显示登录框）
+        function relogin() {
+            localStorage.removeItem('apiKey');
+            document.getElementById('apiKey').value = '';
+            document.getElementById('apiKeyStatus').textContent = '';
+            document.getElementById('apiKeyInfo').textContent = '';
+            showLoginModal();
+            showToast('已清除当前认证，请重新登录', 'info');
+        }
+
+        // 更新API Key信息显示
+        function updateApiKeyInfo() {
+            const apiKeyInfo = document.getElementById('apiKeyInfo');
+            const currentApiKey = getApiKey();
+
+            if (currentApiKey) {
+                const maskedKey = currentApiKey.substring(0, 8) + '...' + currentApiKey.substring(currentApiKey.length - 4);
+                const saveTime = localStorage.getItem('apiKeySavedTime');
+                const timeText = saveTime ? new Date(saveTime).toLocaleString() : '未知时间';
+                apiKeyInfo.textContent = `当前API Key: ${maskedKey} (保存于: ${timeText})`;
+            } else {
+                apiKeyInfo.textContent = '未保存API Key';
+            }
+        }
+
+        // 保存API Key时同时保存时间戳
+        function setApiKey(apiKey) {
+            localStorage.setItem('apiKey', apiKey);
+            localStorage.setItem('apiKeySavedTime', new Date().toISOString());
+        }
+
+        // --- 登录认证检查 ---
+        function checkAuthStatus() {
+            const apiKey = getApiKey();
+            if (!apiKey) {
+                showLoginModal();
+                return false;
+            }
+            return true;
+        }
+
+        // 显示登录模态框
+        function showLoginModal() {
+            // 如果已有登录模态框就显示，否则动态创建
+            let loginModal = document.getElementById('loginModal');
+            if (!loginModal) {
+                const loginModalHTML = `
+                    <div class="modal" id="loginModal" style="display: flex;">
+                        <div class="modal-content" style="max-width: 400px;">
+                            <div class="modal-header">
+                                <h3>登录验证</h3>
+                            </div>
+                            <div class="modal-body">
+                                <div class="form-group">
+                                    <label class="form-label" for="loginApiKey">API Key</label>
+                                    <input type="password" class="form-input" id="loginApiKey" placeholder="请输入API Key" onkeypress="if(event.key==='Enter') handleLogin()">
+                                    <small>输入配置文件中设置的API Key进行验证</small>
+                                </div>
+                                <div id="loginStatus" style="margin-top: 12px; font-size: 14px;"></div>
+                            </div>
+                            <div class="modal-footer">
+                                <button class="btn btn-primary" onclick="handleLogin()">登录</button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                document.body.insertAdjacentHTML('beforeend', loginModalHTML);
+                loginModal = document.getElementById('loginModal');
+
+                // 点击背景关闭登录模态框（可选）
+                loginModal.addEventListener('click', (e) => {
+                    if (e.target === loginModal) {
+                        e.stopPropagation();
+                    }
+                });
+            }
+
+            loginModal.classList.add('show');
+            document.getElementById('loginApiKey').focus();
+        }
+
+        // 处理登录
+        async function handleLogin() {
+            const apiKeyInput = document.getElementById('loginApiKey');
+            const loginStatus = document.getElementById('loginStatus');
+            const apiKey = apiKeyInput.value.trim();
+
+            if (!apiKey) {
+                loginStatus.textContent = 'API Key不能为空';
+                loginStatus.style.color = 'var(--danger)';
+                return;
+            }
+
+            loginStatus.textContent = '登录中...';
+            loginStatus.style.color = 'var(--text-muted)';
+
+            try {
+                const res = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ apikey: apiKey })
+                });
+
+                const data = await res.json();
+
+                if (data.success) {
+                    // 登录成功，保存到localStorage
+                    setApiKey(apiKey);
+                    loginStatus.textContent = '登录成功！';
+                    loginStatus.style.color = 'var(--success)';
+
+                    // 关闭模态框并加载数据
+                    setTimeout(() => {
+                        closeModal('loginModal');
+                        loadAllData();
+                        showToast('登录成功，欢迎使用！', 'success');
+                    }, 500);
+                } else {
+                    loginStatus.textContent = data.error || '登录失败';
+                    loginStatus.style.color = 'var(--danger)';
+                }
+            } catch (e) {
+                loginStatus.textContent = '登录请求失败: ' + e.message;
+                loginStatus.style.color = 'var(--danger)';
+            }
+        }
+
         // --- 初始化 ---
         document.addEventListener('DOMContentLoaded', () => {
             initTheme();
+            // 检查登录状态，未登录则显示登录框
+            if (!checkAuthStatus()) {
+                return; // 未登录，不加载数据
+            }
             loadAllData();
             setInterval(checkServerStatus, 30000); // 每30秒检查一次服务状态
         });
@@ -996,7 +1212,9 @@
             const indicator = document.getElementById('serviceStatus');
             if (!indicator) return;
             try {
-                const res = await fetch(`${API_BASE}/api/status`);
+                const res = await fetch(`${API_BASE}/api/status`, {
+                    headers: getAuthHeaders()
+                });
                 console.log('Server Status Response:', res);
                 if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
                 const data = await res.json();
@@ -1013,7 +1231,13 @@
         // --- 账号管理 (Accounts) ---
         async function loadAccounts() {
             try {
-                const res = await fetch(`${API_BASE}/api/accounts`);
+                const res = await fetch(`${API_BASE}/api/accounts`, {
+                    headers: getAuthHeaders()
+                });
+                if (!res.ok) {
+                    const error = await res.json();
+                    throw new Error(error.error?.message || 'API认证失败');
+                }
                 const data = await res.json();
                 accountsData = data.accounts || [];
                 document.getElementById('currentIndex').textContent = data.current_index || 0;
@@ -1095,7 +1319,7 @@
             try {
                 const res = await fetch(`${API_BASE}/api/accounts/${id}`, {
                     method: 'PUT',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: getAuthHeaders(),
                     body: JSON.stringify(account)
                 });
                 const data = await res.json();
@@ -1122,15 +1346,18 @@
             try {
                 const res = await fetch(`${API_BASE}/api/accounts`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ 
-                        team_id: teamId, 
-                        "secure_c_ses": secureCses, 
-                        "host_c_oses": hostCoses, 
-                        "csesidx": csesidx, 
+                    headers: getAuthHeaders(),
+                    body: JSON.stringify({
+                        team_id: teamId,
+                        "secure_c_ses": secureCses,
+                        "host_c_oses": hostCoses,
+                        "csesidx": csesidx,
                         "user_agent": userAgent })
                 });
-                if (!res.ok) throw new Error((await res.json()).detail);
+                if (!res.ok) {
+                    const error = await res.json();
+                    throw new Error(error.error?.message || 'API认证失败');
+                }
                 showToast('账号添加成功!', 'success');
                 closeModal('addAccountModal');
                 loadAccounts();
@@ -1142,8 +1369,14 @@
         async function deleteAccount(id) {
             if (!confirm('确定要删除这个账号吗？')) return;
             try {
-                const res = await fetch(`${API_BASE}/api/accounts/${id}`, { method: 'DELETE' });
-                if (!res.ok) throw new Error((await res.json()).detail);
+                const res = await fetch(`${API_BASE}/api/accounts/${id}`, {
+                    method: 'DELETE',
+                    headers: getAuthHeaders()
+                });
+                if (!res.ok) {
+                    const error = await res.json();
+                    throw new Error(error.error?.message || 'API认证失败');
+                }
                 showToast('账号删除成功!', 'success');
                 loadAccounts();
             } catch (e) {
@@ -1154,12 +1387,18 @@
         async function testAccount(id) {
             showToast(`正在测试账号ID: ${id}...`, 'info');
             try {
-                const res = await fetch(`${API_BASE}/api/accounts/${id}/test`);
+                const res = await fetch(`${API_BASE}/api/accounts/${id}/test`, {
+                    headers: getAuthHeaders()
+                });
+                if (!res.ok) {
+                    const error = await res.json();
+                    throw new Error(error.error?.message || 'API认证失败');
+                }
                 const data = await res.json();
-                if (res.ok && data.success) {
+                if (data.success) {
                     showToast(`账号 ${id} 测试成功!`, 'success');
                 } else {
-                    throw new Error(data.detail || '未知错误');
+                    throw new Error(data.error || data.detail || '未知错误');
                 }
                 loadAccounts();
             } catch (e) {
@@ -1173,10 +1412,14 @@
             try {
                 const res = await fetch(`${API_BASE}/api/accounts/${id}/toggle`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' }
+                    headers: getAuthHeaders()
                 });
+                if (!res.ok) {
+                    const error = await res.json();
+                    throw new Error(error.error?.message || 'API认证失败');
+                }
                 const data = await res.json();
-                if (res.ok && data.success) {
+                if (data.success) {
                     showToast(`账号 ${id} ${action}成功!`, 'success');
                     loadAccounts();
                 } else {
@@ -1276,10 +1519,18 @@
         // --- 系统设置 (Settings) ---
         async function loadConfig() {
             try {
-                const res = await fetch(`${API_BASE}/api/config`);
+                const res = await fetch(`${API_BASE}/api/config`, {
+                    headers: getAuthHeaders()
+                });
+                if (!res.ok) {
+                    const error = await res.json();
+                    throw new Error(error.error?.message || 'API认证失败');
+                }
                 configData = await res.json();
                 document.getElementById('proxyUrl').value = configData.proxy || '';
+                document.getElementById('apiKey').value = ''; // 不显示当前API Key，提高安全性
                 document.getElementById('configJson').value = JSON.stringify(configData, null, 2);
+                updateApiKeyInfo(); // 更新API Key信息显示
             } catch (e) {
                 showToast('加载配置失败: ' + e.message, 'error');
             }
