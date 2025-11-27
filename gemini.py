@@ -20,7 +20,7 @@ from pathlib import Path
 from datetime import datetime
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
-from flask import Flask, request, Response, jsonify, send_from_directory, abort
+from flask import Flask, request, Response, jsonify, send_from_directory, abort, redirect, session, render_template_string
 from flask_cors import CORS
 
 # 禁用SSL警告
@@ -151,7 +151,6 @@ def check_admin_auth() -> bool:
         return True
 
     # 检查 session 中是否有认证标记（Web界面登录）
-    from flask import session
     if session.get('admin_authenticated') == True:
         return True
 
@@ -167,7 +166,6 @@ def check_api_auth() -> bool:
 def require_admin_auth(f):
     """管理页面鉴权装饰器"""
     from functools import wraps
-    from flask import redirect, request
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if not check_admin_auth():
@@ -1425,27 +1423,27 @@ def get_image_base_url(fallback_host_url: str) -> str:
 
 def build_openai_response_content(chat_response: ChatResponse, host_url: str) -> str:
     """构建OpenAI格式的响应内容
-    
-    返回纯文本，如果有图片则将图片URL追加到文本末尾
+
+    返回Markdown格式文本，如果有图片则将图片以Markdown格式嵌入文本中
     """
     result_text = chat_response.text
-    
-    # 如果有图片，将图片URL追加到文本中
+
+    # 如果有图片，将图片以Markdown格式嵌入文本中
     if chat_response.images:
         base_url = get_image_base_url(host_url)
-        image_urls = []
-        
+
         for img in chat_response.images:
             if img.file_name:
                 image_url = f"{base_url}image/{img.file_name}"
-                image_urls.append(image_url)
-        
-        if image_urls:
-            # 在文本末尾添加图片URL
-            if result_text:
-                result_text += "\n\n"
-            result_text += "\n".join(image_urls)
-    
+                # 构造Markdown图片格式：![描述](URL)
+                # 使用文件名作为图片描述，去掉扩展名
+                description = Path(img.file_name).stem if '.' in img.file_name else img.file_name
+
+                # 在文本末尾添加Markdown图片
+                if result_text:
+                    result_text += "\n\n"
+                result_text += f"![{description}]({image_url})"
+
     return result_text
 
 
@@ -1453,15 +1451,15 @@ def build_openai_response_content(chat_response: ChatResponse, host_url: str) ->
 
 @app.route('/image/<path:filename>')
 def serve_image(filename):
-    """提供缓存图片的访问"""
+    """提供缓存图片的访问（支持跨域）"""
     # 安全检查：防止路径遍历
     if '..' in filename or filename.startswith('/'):
         abort(404)
-    
+
     filepath = IMAGE_CACHE_DIR / filename
     if not filepath.exists():
         abort(404)
-    
+
     # 确定Content-Type
     ext = filepath.suffix.lower()
     mime_types = {
@@ -1472,8 +1470,22 @@ def serve_image(filename):
         '.webp': 'image/webp',
     }
     mime_type = mime_types.get(ext, 'application/octet-stream')
-    
-    return send_from_directory(IMAGE_CACHE_DIR, filename, mimetype=mime_type)
+
+    # 读取图片数据并创建响应对象
+    try:
+        with open(filepath, 'rb') as f:
+            image_data = f.read()
+
+        # 创建响应并添加CORS头
+        response = Response(image_data, mimetype=mime_type)
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+
+        return response
+    except Exception as e:
+        app.logger.error(f"Error serving image {filename}: {e}")
+        abort(500)
 
 
 @app.route('/health', methods=['GET'])
@@ -1508,9 +1520,10 @@ def system_status():
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     """管理页面登录"""
-    admin_pwd = account_manager.config.get("admin_pwd")
-    if not admin_pwd:
-        # 如果没有设置密码，直接重定向到管理页面
+
+    apikey = account_manager.config.get("apikey")
+    if not apikey:
+        # 如果没有设置API Key，直接重定向到管理页面（兼容原有行为）
         return redirect('/')
 
     if request.method == 'GET':
@@ -1557,13 +1570,10 @@ def login():
 </body>
 </html>
         '''
-        from flask import render_template_string
         return render_template_string(login_html, error=request.args.get('error'))
 
     # 处理登录 POST 请求 - 使用api_key统一认证
-    from flask import session, redirect
     password = request.form.get('password')
-    apikey = account_manager.config.get("apikey")
 
     if apikey and password == apikey:
         session['admin_authenticated'] = True
@@ -1601,7 +1611,6 @@ def api_login():
             })
 
         # 验证成功
-        from flask import session
         session['admin_authenticated'] = True
 
         return jsonify({
@@ -1620,7 +1629,6 @@ def api_login():
 @app.route('/logout', methods=['POST'])
 def logout():
     """管理页面登出"""
-    from flask import session
     session.pop('admin_authenticated', None)
     return redirect('/login')
 
